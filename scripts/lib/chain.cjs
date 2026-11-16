@@ -11,7 +11,8 @@ const env = loadEnv();
 
 async function identities() {
   const out = {};
-  for (const role of ["OWNER", "AGENT"]) {
+  const roles = ["OWNER", "AGENT", "SPARE1"].filter((r) => env[`${r}_MNEMONIC`]);
+  for (const role of roles) {
     const mnemonic = env[`${role}_MNEMONIC`];
     const acct = await deriveUnifiedAccount(mnemonic);
     const pqc = derivePqcCanonical(acct.cosmos, mnemonic);

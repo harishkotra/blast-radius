@@ -10,10 +10,12 @@ A stolen key is worth only what the policy admits.
 
 ## Short description (~50 words, for card/grid)
 
-Post-quantum authority for agent wallets. Declare a policy once — per-tx cap,
-allowlist, expiry, call budget — and it compiles into a chain-level EVM
-authorisation window plus a vault contract. Hand out the agent's classic key.
-Publish it. It cannot leave the policy, and every attempt it makes is logged.
+Post-quantum authority for agent wallets. Declare a policy once — caps,
+allowlist, expiry, call budget, heartbeat — and it compiles into a chain-level
+EVM authorisation window plus a vault contract. Hand out the agent's classic key
+and publish it. It cannot leave the policy, its authority expires if you go
+quiet, it can be rotated out in one transaction, and every attempt it makes is
+logged.
 
 ## Long description (project page body)
 
@@ -35,6 +37,15 @@ charged to every ancestor, so the same budget cannot be spent twice, and one
 revocation kills the whole subtree. `blastRadius(node)` reports the minimum
 remaining authority across every ancestor, which is the honest number.
 
+Authority is treated as a loan, not a grant. Two mechanisms make that literal.
+A `heartbeat` field means the vault refuses with `REFUSED_STALE_HEARTBEAT` once
+the owner has been silent longer than the term: no kill transaction, no
+administrator, the authority simply reaches zero, and any relayer can restore it
+with one ML-DSA-87 signature from the owner. And `rotate` moves the entire
+policy — caps, expiry, allowlist, the day's spend already consumed, the freeze
+state — to a new key in a single transaction, after which the old key returns
+`REFUSED_ROTATED` forever. The leaked key dies; the agent never goes down.
+
 Refusals do not revert. They return a stable reason code and emit an event, so
 the refusal log is the product surface: anyone can read what a compromised key
 tried, in what order, and see exactly how much it got — nothing.
@@ -43,8 +54,9 @@ tried, in what order, and see exactly how much it got — nothing.
 
 - Vault address: `<filled after deploy>`
 - Agent address (and its published private key, on purpose): `<filled>`
-- 25 forge tests, covering every leaked-key path and the delegation-attenuation
-  path
+- 35 forge tests, including an adversarial harness that hands a fuzzer the agent
+  key and free choice of amount, target and timing: 100,000 sequences, zero
+  escapes, and the bound proven tight
 - Policy compiler validated against live chain limits before broadcast
 
 ## Stack

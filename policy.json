@@ -8,5 +8,7 @@
   "windowMaxTxs": 3,
   "allowedTargets": [
     "0x1111111111111111111111111111111111111111"
-  ]
+  ],
+  "heartbeatSeconds": 900,
+  "_comment": "heartbeatSeconds: if the owner stops signing liveness proofs, authority hits zero with no transaction from anyone."
 }

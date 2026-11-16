@@ -43,6 +43,10 @@ function validate(policy) {
     errors.push("maxCallsPerDay must be >= 1");
   }
   if (!(policy.expiryHours > 0)) errors.push("expiryHours must be > 0");
+  const hb = policy.heartbeatSeconds ?? 0;
+  if (!Number.isInteger(hb) || hb < 0 || hb > 604_800) {
+    errors.push("heartbeatSeconds must be an integer in [0, 604800] (0 disables liveness)");
+  }
 
   return { errors, perTx, daily };
 }
@@ -72,11 +76,15 @@ function compile(policy, { nowSeconds = Math.floor(Date.now() / 1000) } = {}) {
       expiry: nowSeconds + Math.round(policy.expiryHours * 3600),
       maxCallsPerDay: policy.maxCallsPerDay,
       active: true,
+      // Authority decays unless the owner keeps proving liveness. 0 = off.
+      heartbeat: policy.heartbeatSeconds ?? 0,
     },
     allowedTargets: policy.allowedTargets,
     // The single number a non-cryptographer can hold onto.
     blastRadiusQor: Number(policy.perTxCapQor),
     worstCaseQor: Number(policy.dailyCapQor),
+    // If the owner goes quiet, authority is worth zero this long from now.
+    silenceKillsInSeconds: policy.heartbeatSeconds ?? 0,
   };
 
   return { ok: true, effective, errors: [] };

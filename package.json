@@ -7,17 +7,21 @@
   "license": "Apache-2.0",
   "scripts": {
     "accounts": "node scripts/00-gen-accounts.cjs",
-    "keys": "node scripts/00b-add-keys.cjs",
-    "policy:check": "node scripts/04-policy-check.cjs",
-    "register": "node scripts/01-register-pqc.cjs",
-    "deploy": "node scripts/05-deploy-vault.cjs",
     "arm": "node scripts/06-arm.cjs",
-    "window:open": "node scripts/02-open-window.cjs",
-    "window:close": "node scripts/03-close-window.cjs",
+    "beat": "node scripts/09-beat.cjs",
     "demo": "node scripts/07-demo.cjs",
+    "deploy": "node scripts/05-deploy-vault.cjs",
+    "keys": "node scripts/00b-add-keys.cjs",
+    "keys:spare": "node scripts/00c-add-spare.cjs",
+    "policy:check": "node scripts/04-policy-check.cjs",
     "probe": "node scripts/99-probe.cjs",
+    "register": "node scripts/01-register-pqc.cjs",
+    "rotate": "node scripts/08-rotate.cjs",
     "start": "node web/server.cjs",
-    "test:contracts": "forge test --root contracts"
+    "test:contracts": "forge test --root contracts",
+    "test:fuzz": "FOUNDRY_FUZZ_RUNS=25000 forge test --root contracts --match-path '*Mev*'",
+    "window:close": "node scripts/03-close-window.cjs",
+    "window:open": "node scripts/02-open-window.cjs"
   },
   "dependencies": {
     "@cosmjs/proto-signing": "^0.39.0",

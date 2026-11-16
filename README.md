@@ -34,6 +34,12 @@ key tried to do. Blast Radius is the missing operator layer:
    authorisation) and in a vault contract (business rules), so a single mistake
    does not become a single point of failure.
 3. **Publish** the resulting blast radius, live, and every refusal.
+4. **Revoke** it without downtime — authority decays on its own when the owner
+   goes quiet, and one signature moves the policy to a key the thief has never
+   seen.
+
+The frame that matters: a delegated key is not a grant, it is a loan. It has an
+amount, a term, and a keeper who must keep proving they are alive.
 
 ## What is actually enforced, and where
 
@@ -121,8 +127,8 @@ every ancestor, not the child's own optimistic number.
 npm install
 npm run accounts          # generates owner + agent identities into .env.local
 npm run policy:check      # compile policy.json, validated against chain bounds
-forge test --root contracts   # 25 tests: leaked-key paths + delegation attenuation
-npm start                 # live page on :8787
+forge test --root contracts   # 35 tests: leaked-key paths, decay, rotation, delegation
+npm start                 # live page on :8899
 ```
 
 Armed deployment (needs a funded testnet account):
@@ -131,7 +137,10 @@ Armed deployment (needs a funded testnet account):
 npm run deploy            # register PQC keys, open owner window, deploy vault
 npm run arm               # fund the vault, sign the policy with ML-DSA-87, write it
 npm run window:open       # open the agent's narrow window
-npm run demo              # the five beats: three attacks, one payment, one close
+npm run demo              # the full run: attacks, decay, rotation, payment, close
+npm run beat              # owner liveness proof (any relayer can send it)
+npm run rotate            # kill the leaked key, keep the agent alive
+npm run test:fuzz         # 100,000 adversarial sequences against the bound
 ```
 
 ## Evidence
@@ -145,12 +154,41 @@ refusal log and the released payments all come from the explorer.
 - Policy signature: ML-DSA-87 over the policy digest, verified on chain by the
   `pqcVerify` precompile — the transaction reverts without it
 
+## Authority that decays, and dies on demand
+
+A cap answers "how much can this key lose". It does not answer "what if nobody
+is watching". Three properties cover that, and each one is enforced in the
+vault, not in a script.
+
+**Silence kills.** `Policy.heartbeat` is a number of seconds. `spend` refuses
+with `REFUSED_STALE_HEARTBEAT` once `now > lastBeat + heartbeat`. Keeping an
+agent alive therefore requires the owner to keep producing ML-DSA-87 signatures;
+the heartbeat transaction can be relayed by anyone, so the owner needs no funded
+key and no uptime beyond the ability to sign. A stolen classical key cannot
+produce one, and cannot extend the deadline.
+
+**Kill without downtime.** `rotate(agent, newAgent)` moves the whole policy —
+caps, expiry, call budget, allowlist, the day's spend already consumed, and the
+freeze state — to a new key in one transaction. The old key is marked
+`rotatedOut` and `spend` returns `REFUSED_ROTATED` from the next block. `npm run
+rotate` hands the policy to `SPARE1`, an identity generated locally that the
+thief has never seen. Rotation cannot launder a cap, because spend carries over.
+
+**The bound is attacked, not asserted.** `contracts/test/BlastRadiusMev.t.sol`
+gives a fuzzer the agent's private key and free choice of amount, target and
+moment, then asserts the vault never pays more than the policy admits. Run at
+25,000 sequences per property:
+
+```
+FOUNDRY_FUZZ_RUNS=25000 forge test --root contracts --match-path '*Mev*'
+```
+
 ## Tests
 
-`forge test --root contracts` — 25 tests, all with a leaked classical key or a
+`forge test --root contracts` — 35 tests, all with a leaked classical key or a
 handed-down authority.
 
-Vault (11)
+Vault (17)
 
 - cannot reach a target that is not allowlisted
 - cannot exceed the per-transaction cap
@@ -160,6 +198,10 @@ Vault (11)
 - policy write rejects a wrong ML-DSA signature and an unproven owner key
 - freeze works from the classical key; unfreeze fails without ML-DSA
 - a recorded refusal costs under 120k gas
+- authority dies when the owner's heartbeat lapses, and a fresh ML-DSA signature
+  restores it without rewriting the policy
+- rotation kills the leaked copy, hands the same policy to a key the thief has
+  never seen, and carries the day's spend across so caps cannot be laundered
 
 Bureau (14)
 
@@ -172,6 +214,16 @@ Bureau (14)
 - cycles are refused: authority cannot flow back up the tree
 - revoking a parent kills the whole subtree in one transaction, and a revoked
   child cannot grant anything
+
+Adversarial (4)
+
+- fuzzed attacker with the key, free choice of amount/target/timing: the vault
+  never pays more than the policy admits (100,000 sequences at
+  `FOUNDRY_FUZZ_RUNS=25000`, zero escapes)
+- a policy-less key moves nothing, whatever the amount or target
+- waiting does not widen authority — time only ever removes it
+- the bound is tight: the policy's full allowance is reachable in one sequence,
+  so the fuzz assertion is not vacuous
 
 ## Honest limits
 

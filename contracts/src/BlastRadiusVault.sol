@@ -30,6 +30,9 @@ contract BlastRadiusVault {
         uint64 expiry; // unix seconds after which the policy is dead
         uint8 maxCallsPerDay; // caps how many times the key can be exercised
         bool active;
+        uint32 heartbeat; // seconds of silence tolerated from the owner; 0 = off
+        uint64 lastBeat; // unix seconds of the last PQ-signed liveness proof
+        bool rotatedOut; // this key was rotated away; permanently dead
     }
 
     struct Spend {
@@ -48,6 +51,8 @@ contract BlastRadiusVault {
     uint8 public constant REFUSED_CALL_BUDGET = 7;
     uint8 public constant REFUSED_NO_POSSESSION_PROOF = 8;
     uint8 public constant REFUSED_INSUFFICIENT_BALANCE = 9;
+    uint8 public constant REFUSED_STALE_HEARTBEAT = 10;
+    uint8 public constant REFUSED_ROTATED = 11;
 
     mapping(address => Policy) public policyOf;
     mapping(address => Spend) public spendOf;
@@ -55,6 +60,8 @@ contract BlastRadiusVault {
     mapping(address => uint256) public policyNonce;
     mapping(address => bool) public frozen;
     mapping(address => uint256) public refusalCount;
+    mapping(address => address[]) public targetsOf;
+    mapping(address => uint256) public beatCount;
 
     uint256 public totalPaid;
     uint256 public totalRefused;
@@ -65,6 +72,8 @@ contract BlastRadiusVault {
     event Paid(address indexed agent, address indexed target, uint256 amount, bytes32 invoiceId);
     event Refused(address indexed agent, address indexed target, uint256 amount, uint8 code, bytes32 invoiceId);
     event Funded(address indexed from, uint256 amount);
+    event Beat(address indexed agent, uint64 at, bytes32 digest);
+    event Rotated(address indexed from, address indexed to, bytes32 digest);
 
     error NotOwner();
     error BadSignature();
@@ -119,6 +128,8 @@ contract BlastRadiusVault {
         }
 
         policyOf[agent] = p;
+        policyOf[agent].lastBeat = uint64(block.timestamp);
+        policyOf[agent].rotatedOut = false;
         policyNonce[agent] += 1;
         frozen[agent] = false;
         emit PolicySet(agent, digest, p.perTxCap, p.dailyCap, p.expiry);
@@ -126,6 +137,65 @@ contract BlastRadiusVault {
         for (uint256 i = 0; i < targets.length; i++) {
             isAllowedTarget[agent][targets[i]] = true;
         }
+        targetsOf[agent] = targets;
+    }
+
+    /// @notice Liveness proof. Authority decays unless the owner keeps signing;
+    ///         the signature is the authority, so any relayer can submit it and
+    ///         the owner never needs to hold a funded key to keep an agent alive.
+    function beat(address agent, bytes calldata pqcSig, bytes calldata ownerPubkey) external {
+        Policy memory p = policyOf[agent];
+        bytes32 digest = heartbeatDigest(agent, p.lastBeat, p.heartbeat);
+        if (!PQC_VERIFY.pqcVerify(ownerPubkey, pqcSig, abi.encodePacked(digest))) {
+            revert BadSignature();
+        }
+        policyOf[agent].lastBeat = uint64(block.timestamp);
+        beatCount[agent] += 1;
+        emit Beat(agent, uint64(block.timestamp), digest);
+    }
+
+    function heartbeatDigest(address agent, uint64 lastBeat, uint32 heartbeat)
+        public
+        view
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(block.chainid, address(this), "HEARTBEAT", agent, lastBeat, heartbeat));
+    }
+
+    /// @notice Hand the same policy to a new key, in one transaction, without
+    ///         pausing. The old key is marked dead and refunds nothing: its
+    ///         spend window carries over, so rotating cannot launder a hit cap.
+    function rotate(
+        address agent,
+        address newAgent,
+        bytes calldata pqcSig,
+        bytes calldata ownerPubkey
+    ) external onlyOwner {
+        Policy memory p = policyOf[agent];
+        if (!p.active || p.rotatedOut) revert BadSignature();
+        bytes32 digest = keccak256(
+            abi.encode(block.chainid, address(this), "ROTATE", agent, newAgent, policyNonce[agent])
+        );
+        if (!PQC_VERIFY.pqcVerify(ownerPubkey, pqcSig, abi.encodePacked(digest))) {
+            revert BadSignature();
+        }
+
+        Policy memory np = p;
+        np.lastBeat = uint64(block.timestamp);
+        np.rotatedOut = false;
+        policyOf[newAgent] = np;
+        spendOf[newAgent] = spendOf[agent]; // the day's spend moves with the policy
+        frozen[newAgent] = frozen[agent]; // a frozen key cannot rotate itself open
+        policyNonce[newAgent] = policyNonce[agent] + 1;
+        targetsOf[newAgent] = targetsOf[agent];
+        for (uint256 i = 0; i < targetsOf[agent].length; i++) {
+            isAllowedTarget[newAgent][targetsOf[agent][i]] = true;
+        }
+
+        policyOf[agent].active = false;
+        policyOf[agent].rotatedOut = true;
+
+        emit Rotated(agent, newAgent, digest);
     }
 
     /// @notice Fast kill switch: classical key only. Cheap by design.
@@ -167,6 +237,7 @@ contract BlastRadiusVault {
                 p.expiry,
                 p.maxCallsPerDay,
                 p.active,
+                p.heartbeat,
                 targets
             )
         );
@@ -187,10 +258,14 @@ contract BlastRadiusVault {
         address agent = msg.sender;
         Policy memory p = policyOf[agent];
 
+        if (p.rotatedOut) return _refuse(agent, target, amount, REFUSED_ROTATED, invoiceId);
         if (!p.active) return _refuse(agent, target, amount, REFUSED_NO_POLICY, invoiceId);
         if (frozen[agent]) return _refuse(agent, target, amount, REFUSED_FROZEN, invoiceId);
         if (block.timestamp > p.expiry) {
             return _refuse(agent, target, amount, REFUSED_EXPIRED, invoiceId);
+        }
+        if (p.heartbeat != 0 && block.timestamp > uint256(p.lastBeat) + p.heartbeat) {
+            return _refuse(agent, target, amount, REFUSED_STALE_HEARTBEAT, invoiceId);
         }
         if (!isAllowedTarget[agent][target]) {
             return _refuse(agent, target, amount, REFUSED_NOT_ALLOWLISTED, invoiceId);
@@ -280,7 +355,10 @@ contract BlastRadiusVault {
         uint256 cap = remaining < balance ? remaining : balance;
         if (p.perTxCap < cap) cap = p.perTxCap;
         if (callRoom == 0) cap = 0;
-        bool dead = frozen[agent] || !p.active || block.timestamp > p.expiry;
+        bool dead = p.rotatedOut || frozen[agent] || !p.active || block.timestamp > p.expiry;
+        if (!dead && p.heartbeat != 0 && block.timestamp > uint256(p.lastBeat) + p.heartbeat) {
+            dead = true;
+        }
 
         return (dead ? 0 : cap, p.perTxCap, remaining, p.expiry, frozen[agent], p.active);
     }
@@ -293,7 +371,47 @@ contract BlastRadiusVault {
         }
     }
 
-    function refusalCodes() external pure returns (string[9] memory) {
+    /// @notice Seconds of authority left: whichever runs out first, the policy
+    ///         expiry or the owner's heartbeat. Reads 0 when already dead.
+    function authorityLeft(address agent) external view returns (uint256) {
+        Policy memory p = policyOf[agent];
+        if (!p.active || p.rotatedOut) return 0;
+        uint256 deadline = p.expiry;
+        if (p.heartbeat != 0) {
+            uint256 beatDeadline = uint256(p.lastBeat) + p.heartbeat;
+            if (beatDeadline < deadline) deadline = beatDeadline;
+        }
+        if (block.timestamp >= deadline) return 0;
+        return deadline - block.timestamp;
+    }
+
+    /// @notice For other contracts: "is this key trustworthy for this payment
+    ///         right now?" Same rules the vault itself applies, no state change.
+    function canSpend(address agent, address target, uint256 amount)
+        external
+        view
+        returns (bool ok, uint8 code)
+    {
+        Policy memory p = policyOf[agent];
+        if (p.rotatedOut) return (false, REFUSED_ROTATED);
+        if (!p.active) return (false, REFUSED_NO_POLICY);
+        if (frozen[agent]) return (false, REFUSED_FROZEN);
+        if (block.timestamp > p.expiry) return (false, REFUSED_EXPIRED);
+        if (p.heartbeat != 0 && block.timestamp > uint256(p.lastBeat) + p.heartbeat) {
+            return (false, REFUSED_STALE_HEARTBEAT);
+        }
+        if (!isAllowedTarget[agent][target]) return (false, REFUSED_NOT_ALLOWLISTED);
+        (, , , bool possessionProven) = PQC_KEY_STATUS.pqcKeyStatus(agent);
+        if (!possessionProven) return (false, REFUSED_NO_POSSESSION_PROOF);
+        if (amount > p.perTxCap) return (false, REFUSED_PER_TX_CAP);
+        (uint256 spent, uint256 calls) = _currentSpend(agent);
+        if (spent + amount > p.dailyCap) return (false, REFUSED_DAILY_CAP);
+        if (calls >= p.maxCallsPerDay) return (false, REFUSED_CALL_BUDGET);
+        if (address(this).balance < amount) return (false, REFUSED_INSUFFICIENT_BALANCE);
+        return (true, 0);
+    }
+
+    function refusalCodes() external pure returns (string[12] memory) {
         return [
             "0 none",
             "1 no policy",
@@ -303,7 +421,10 @@ contract BlastRadiusVault {
             "5 over per-tx cap",
             "6 over daily cap",
             "7 call budget exhausted",
-            "8 no possession proof"
+            "8 no possession proof",
+            "9 insufficient balance",
+            "10 heartbeat lapsed",
+            "11 key rotated out"
         ];
     }
 }

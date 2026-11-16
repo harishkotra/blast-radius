@@ -84,7 +84,10 @@ contract BlastRadiusVaultTest is Test {
             dailyCap: daily,
             expiry: expiry,
             maxCallsPerDay: calls,
-            active: true
+            active: true,
+            heartbeat: 0,
+            lastBeat: 0,
+            rotatedOut: false
         });
     }
 
@@ -247,5 +250,132 @@ contract BlastRadiusVaultTest is Test {
         uint256 used = gasBefore - gasleft();
         emit log_named_uint("gas for a recorded refusal", used);
         assertLt(used, 120_000);
+    }
+    // ---------- liveness: authority has a pulse ----------
+
+    function _installWithHeartbeat(uint32 beat) internal {
+        address[] memory targets = new address[](1);
+        targets[0] = vendor;
+        BlastRadiusVault.Policy memory p = _policy(1 ether, 3 ether, uint64(block.timestamp + 7 days), 5);
+        p.heartbeat = beat;
+        bytes32 digest = vault.policyDigest(agent, p, targets, 0);
+        vm.prank(owner);
+        vault.setPolicy(agent, p, targets, _sig(digest), ownerKey);
+    }
+
+    function test_silenceKillsAuthorityWithoutATransaction() public {
+        _installWithHeartbeat(1 hours);
+
+        vm.prank(agent);
+        (bool ok, ) = vault.request(vendor, 0.1 ether, "while-alive");
+        assertTrue(ok);
+
+        vm.warp(block.timestamp + 2 hours); // owner goes quiet; nobody sends a kill tx
+
+        vm.prank(agent);
+        (, uint8 code) = vault.request(vendor, 0.1 ether, "after-silence");
+        assertEq(code, vault.REFUSED_STALE_HEARTBEAT());
+        (uint256 spendable, , , , , ) = vault.blastRadius(agent);
+        assertEq(spendable, 0);
+        assertEq(vault.authorityLeft(agent), 0);
+    }
+
+    function test_heartbeatRestoresAuthority() public {
+        _installWithHeartbeat(1 hours);
+        vm.warp(block.timestamp + 2 hours);
+
+        (uint96 ptc, uint96 dc, uint64 ex, uint8 mcp, bool act, uint32 hb, uint64 lb, bool ro) =
+            vault.policyOf(agent);
+        ptc; dc; ex; mcp; act; ro;
+        bytes32 digest = vault.heartbeatDigest(agent, lb, hb);
+        vm.prank(owner);
+        vm.expectRevert(BlastRadiusVault.BadSignature.selector);
+        vault.beat(agent, abi.encodePacked(bytes32(uint256(3))), ownerKey);
+
+        // anyone can relay the owner's signature — including a third party
+        address relayer = address(0xFEE1);
+        vm.prank(relayer);
+        vault.beat(agent, _sig(digest), ownerKey);
+
+        vm.prank(agent);
+        (bool ok, ) = vault.request(vendor, 0.1 ether, "alive-again");
+        assertTrue(ok);
+        assertGt(vault.authorityLeft(agent), 0);
+    }
+
+    // ---------- rotation: the thief's copy dies mid-run ----------
+
+    function _rotateTo(address newAgent) internal {
+        bytes32 digest = keccak256(
+            abi.encode(
+                block.chainid,
+                address(vault),
+                "ROTATE",
+                agent,
+                newAgent,
+                vault.policyNonce(agent)
+            )
+        );
+        vm.prank(owner);
+        vault.rotate(agent, newAgent, _sig(digest), ownerKey);
+    }
+
+    function test_rotationKillsTheStolenCopy() public {
+        _install(1 ether, 3 ether, uint64(block.timestamp + 1 days), 5);
+        address fresh = address(0xF4E5);
+        status.set(fresh, hex"cc33", true);
+
+        vm.prank(agent); // the thief has been spending
+        (bool ok, ) = vault.request(vendor, 0.5 ether, "thief-1");
+        assertTrue(ok);
+
+        _rotateTo(fresh);
+
+        vm.prank(agent); // same stolen key, next attempt
+        (, uint8 code) = vault.request(vendor, 0.5 ether, "thief-2");
+        assertEq(code, vault.REFUSED_ROTATED());
+        assertEq(vault.authorityLeft(agent), 0);
+
+        vm.prank(fresh); // the key the thief never saw
+        (ok, ) = vault.request(vendor, 0.5 ether, "real-work");
+        assertTrue(ok);
+    }
+
+    function test_rotationCannotLaunderTheDailyCap() public {
+        _install(1 ether, 1 ether, uint64(block.timestamp + 1 days), 5);
+        address fresh = address(0xF4E5);
+        status.set(fresh, hex"cc33", true);
+
+        vm.prank(agent);
+        vault.request(vendor, 1 ether, "day-spent");
+        _rotateTo(fresh);
+
+        vm.prank(fresh); // spend carried over with the policy: no fresh budget
+        (, uint8 code) = vault.request(vendor, 0.1 ether, "same-day");
+        assertEq(code, vault.REFUSED_DAILY_CAP());
+    }
+
+    function test_frozenKeyCannotRotateItselfOpen() public {
+        _install(1 ether, 3 ether, uint64(block.timestamp + 1 days), 5);
+        address fresh = address(0xF4E5);
+        status.set(fresh, hex"cc33", true);
+        vm.prank(owner);
+        vault.freeze(agent);
+
+        _rotateTo(fresh);
+
+        vm.prank(fresh); // the freeze rides along with the policy
+        (, uint8 code) = vault.request(vendor, 0.1 ether, "still-frozen");
+        assertEq(code, vault.REFUSED_FROZEN());
+    }
+
+    function test_canSpendAgreesWithRequest() public {
+        _install(1 ether, 3 ether, uint64(block.timestamp + 1 days), 5);
+        (bool ok, uint8 code) = vault.canSpend(agent, vendor, 0.5 ether);
+        assertTrue(ok);
+        assertEq(code, 0);
+        (ok, code) = vault.canSpend(agent, attackerTarget, 0.5 ether);
+        assertFalse(ok);
+        assertEq(code, vault.REFUSED_NOT_ALLOWLISTED());
     }
 }

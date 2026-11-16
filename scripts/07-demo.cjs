@@ -89,6 +89,69 @@ async function main() {
   line(`  vendor received: ${formatEther(await pub.getBalance({ address: VENDOR }))} QOR`);
   line(`  window after : ${w1.remainingTxs} txs left, ${w1.remainingBlocks} blocks left`);
 
+
+  // ── authority decays on its own, with nobody sending a kill transaction
+  head("DECAY  ·  the owner goes quiet; authority expires by itself");
+  const pol = await pub.readContract({
+    address: deploy.vault, abi: ABI, functionName: "policyOf", args: [attacker.address],
+  });
+  const heartbeat = Number(pol[5]);
+  const lastBeat = Number(pol[6]);
+  const leftNow = heartbeat ? Math.max(0, lastBeat + heartbeat - Math.floor(Date.now() / 1000)) : null;
+  if (!heartbeat) {
+    line("  this policy has no heartbeat, so silence changes nothing");
+  } else if (leftNow > 0) {
+    line(`  authority still alive: ${leftNow}s left of a ${heartbeat}s heartbeat`);
+    line("  → to stage the lapse on camera, set heartbeatSeconds to 60, re-arm, wait a minute");
+  } else {
+    line(`  owner silent for ${Math.floor(Date.now() / 1000) - lastBeat}s, heartbeat was ${heartbeat}s`);
+    const [ok, code] = await pub.readContract({
+      address: deploy.vault, abi: ABI, functionName: "canSpend",
+      args: [attacker.address, VENDOR, parseEther("0.1")],
+    });
+    const hd = await wallet.writeContract({
+      address: deploy.vault, abi: ABI, functionName: "request",
+      args: [VENDOR, parseEther("0.1"), keccak256(toHex("after-silence"))],
+    });
+    await pub.waitForTransactionReceipt({ hash: hd });
+    line(`  the key still works as a transaction sender, and still cannot spend (code ${code}: ${REFUSAL_CODES[code]})`);
+    line(`  tx ${hd}`);
+    const r = await require("./lib/beat.cjs").beat({ agent: attacker.address });
+    const after = await pub.readContract({
+      address: deploy.vault, abi: ABI, functionName: "canSpend",
+      args: [attacker.address, VENDOR, parseEther("0.1")],
+    });
+    line(`  owner proves liveness (one ML-DSA signature, relayed by anyone): ${r.hash}`);
+    line(`  authority restored without a new policy: spendable=${after[0]}`);
+  }
+
+  // ── kill the leaked key without pausing the agent
+  head("ROTATE  ·  the leaked key dies, the policy survives");
+  const spare = ids.SPARE1;
+  if (!spare) {
+    line("  no spare identity on this machine (run npm run keys:spare) — skipping");
+  } else {
+    const { rotateAgent } = require("./lib/rotate.cjs");
+    const rot = await rotateAgent({ from: attacker.address, to: spare.evm });
+    line(`  ${attacker.address} -> ${spare.evm}`);
+    line(`  tx ${rot.hash}`);
+    const [deadOk, deadCode] = await pub.readContract({
+      address: deploy.vault, abi: ABI, functionName: "canSpend",
+      args: [attacker.address, VENDOR, parseEther("0.1")],
+    });
+    line(`  old key: spendable=${deadOk} code=${deadCode} (${REFUSAL_CODES[deadCode]})`);
+    const spareWallet = createWalletClient({
+      account: privateKeyToAccount(spare.privateKey), transport: viemHttp(endpoints.evm),
+    });
+    const hs = await spareWallet.writeContract({
+      address: deploy.vault, abi: ABI, functionName: "request",
+      args: [VENDOR, parseEther("0.25"), keccak256(toHex("rotation-invoice"))],
+    });
+    const rs = await pub.waitForTransactionReceipt({ hash: hs });
+    line(`  new key pays the vendor in the same block range: status ${rs.status}`);
+    line("  → the thief's copy is worthless, and the agent never went down");
+  }
+
   // ── the door closes
   head("CLOSE  ·  owner shuts the window; the key stops working mid-flow");
   const { txClientFor } = require("./lib/chain.cjs");
@@ -120,6 +183,12 @@ async function main() {
     }
     if (l.eventName === "Paid") {
       line(`  paid     ${l.args.target}  ${formatEther(l.args.amount)} QOR  · released`);
+    }
+    if (l.eventName === "Beat") {
+      line(`  beat     owner alive  · authority extended`);
+    }
+    if (l.eventName === "Rotated") {
+      line(`  rotated  ${l.args.from}  ->  ${l.args.to}`);
     }
   }
   line();

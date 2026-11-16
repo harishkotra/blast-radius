@@ -62,7 +62,7 @@ async function main() {
       [
         { type: "uint256" }, { type: "address" }, { type: "address" }, { type: "uint256" },
         { type: "uint96" }, { type: "uint96" }, { type: "uint64" }, { type: "uint8" },
-        { type: "bool" }, { type: "address[]" },
+        { type: "bool" }, { type: "uint32" }, { type: "address[]" },
       ],
       [
         BigInt(EVM_CHAIN_ID),
@@ -74,6 +74,7 @@ async function main() {
         BigInt(effective.vault.expiry),
         effective.vault.maxCallsPerDay,
         true,
+        effective.vault.heartbeat,
         effective.allowedTargets,
       ]
     )
@@ -94,6 +95,9 @@ async function main() {
         expiry: BigInt(effective.vault.expiry),
         maxCallsPerDay: effective.vault.maxCallsPerDay,
         active: true,
+        heartbeat: effective.vault.heartbeat,
+        lastBeat: 0, // the contract stamps this itself
+        rotatedOut: false,
       },
       effective.allowedTargets,
       sig,
