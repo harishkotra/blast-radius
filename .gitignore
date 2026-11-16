@@ -1,0 +1,9 @@
+node_modules/
+.env.local
+.deploy.json
+.window.json
+.bureau.json
+contracts/out/
+contracts/cache/
+.DS_Store
+*.log

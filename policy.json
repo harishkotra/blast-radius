@@ -1,0 +1,12 @@
+{
+  "agent": "AGENT",
+  "perTxCapQor": "2",
+  "dailyCapQor": "5",
+  "expiryHours": 24,
+  "maxCallsPerDay": 3,
+  "windowBlocks": 300,
+  "windowMaxTxs": 3,
+  "allowedTargets": [
+    "0x1111111111111111111111111111111111111111"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "name": "blast-radius",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bounded authority for agent and operator keys on QoreChain",
+  "license": "Apache-2.0",
+  "scripts": {
+    "accounts": "node scripts/00-gen-accounts.cjs",
+    "keys": "node scripts/00b-add-keys.cjs",
+    "policy:check": "node scripts/04-policy-check.cjs",
+    "register": "node scripts/01-register-pqc.cjs",
+    "deploy": "node scripts/05-deploy-vault.cjs",
+    "arm": "node scripts/06-arm.cjs",
+    "window:open": "node scripts/02-open-window.cjs",
+    "window:close": "node scripts/03-close-window.cjs",
+    "demo": "node scripts/07-demo.cjs",
+    "probe": "node scripts/99-probe.cjs",
+    "start": "node web/server.cjs",
+    "test:contracts": "forge test --root contracts"
+  },
+  "dependencies": {
+    "@cosmjs/proto-signing": "^0.39.0",
+    "@cosmjs/stargate": "^0.39.0",
+    "@qorechain/evm": "^0.14.0",
+    "@qorechain/pqc": "^0.2.3",
+    "@qorechain/qoresign": "^0.2.0",
+    "@qorechain/sdk": "^0.14.0",
+    "viem": "^2.57.20"
+  }
+}
